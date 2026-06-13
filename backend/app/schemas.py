@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict
 from datetime import datetime
 from typing import Optional, List
 
@@ -44,14 +44,37 @@ class TicketUpdate(TicketBase):
 
 
 class TicketResponse(TicketBase):
+    model_config = ConfigDict(from_attributes=True)
+    
     id: int
+    status: str
+    status_updated_at: datetime
+    rejected_reason: Optional[str] = None
     created_at: datetime
     updated_at: datetime
     deleted_at: Optional[datetime] = None
     images: List[TicketImageResponse] = []
+    operation_logs: List['OperationLogResponse'] = []
+    is_sla_breached: bool = False
+    sla_hours_remaining: Optional[float] = None
 
-    class Config:
-        from_attributes = True
+
+class OperationLogResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    
+    id: int
+    ticket_id: int
+    operator: str
+    action: str
+    changes: Optional[dict] = None
+    client_ip: Optional[str] = None
+    remark: Optional[str] = None
+    created_at: datetime
+
+
+class StatusTransitionRequest(BaseModel):
+    action: str = Field(..., description="动作：accept(受理), process(处理中), review(待复核), close(结案), reject(驳回)")
+    rejected_reason: Optional[str] = Field(None, description="驳回时必填")
 
 
 class TicketListResponse(BaseModel):
@@ -60,3 +83,6 @@ class TicketListResponse(BaseModel):
     page: int
     page_size: int
     total_pages: int
+
+
+OperationLogResponse.model_rebuild()

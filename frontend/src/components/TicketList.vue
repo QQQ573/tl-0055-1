@@ -9,9 +9,8 @@
             </el-select>
           </el-form-item>
           <el-form-item label="状态">
-            <el-select v-model="filterForm.is_closed" placeholder="全部状态" clearable style="width: 150px">
-              <el-option label="未结案" :value="false" />
-              <el-option label="已结案" :value="true" />
+            <el-select v-model="filterForm.status" placeholder="全部状态" clearable style="width: 150px">
+              <el-option v-for="s in statusOptions" :key="s.value" :label="s.label" :value="s.value" />
             </el-select>
           </el-form-item>
           <el-form-item>
@@ -49,11 +48,23 @@
             <span v-else class="text-muted">-</span>
           </template>
         </el-table-column>
-        <el-table-column prop="is_closed" label="状态" width="90">
+        <el-table-column prop="is_closed" label="状态" width="130">
           <template #default="{ row }">
-            <el-tag :type="row.is_closed ? 'success' : 'warning'">
-              {{ row.is_closed ? '已结案' : '未结案' }}
+            <el-tag :type="getStatusTagType(row.status)" size="small">
+              {{ getStatusName(row.status) }}
             </el-tag>
+            <el-tooltip v-if="row.sla_hours_remaining !== null && row.status !== 'processing'" placement="top">
+              <template #content>
+                <div>剩余时间: {{ row.sla_hours_remaining }}小时</div>
+                <div v-if="row.is_sla_breached" style="color: #f56c6c; font-weight: bold;">⚠️ 已超时!</div>
+              </template>
+              <span v-if="row.is_sla_breached" class="sla-badge sla-breached">
+                SLA超时
+              </span>
+              <span v-else-if="row.sla_hours_remaining !== null" class="sla-badge" :class="row.sla_hours_remaining < 1 ? 'sla-warning' : ''">
+                {{ row.sla_hours_remaining }}h
+              </span>
+            </el-tooltip>
           </template>
         </el-table-column>
         <el-table-column prop="has_compensation" label="有补偿" width="80">
@@ -197,7 +208,7 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="detailVisible" title="工单详情" width="600px">
+    <el-dialog v-model="detailVisible" title="工单详情" width="700px">
       <el-descriptions :column="2" border>
         <el-descriptions-item label="工单ID">{{ currentTicket.id }}</el-descriptions-item>
         <el-descriptions-item label="品牌">
@@ -207,8 +218,8 @@
         <el-descriptions-item label="投诉类型">{{ currentTicket.complaint_type }}</el-descriptions-item>
         <el-descriptions-item label="处理人">{{ currentTicket.handler }}</el-descriptions-item>
         <el-descriptions-item label="状态">
-          <el-tag :type="currentTicket.is_closed ? 'success' : 'warning'">
-            {{ currentTicket.is_closed ? '已结案' : '未结案' }}
+          <el-tag :type="getStatusTagType(currentTicket.status)" size="small">
+            {{ getStatusName(currentTicket.status) }}
           </el-tag>
         </el-descriptions-item>
         <el-descriptions-item label="是否补偿">
@@ -225,7 +236,55 @@
         <el-descriptions-item v-if="currentTicket.closing_remark" label="结案备注" :span="2">
           {{ currentTicket.closing_remark }}
         </el-descriptions-item>
+        <el-descriptions-item v-if="currentTicket.rejected_reason" label="驳回原因" :span="2">
+          {{ currentTicket.rejected_reason }}
+        </el-descriptions-item>
       </el-descriptions>
+
+      <div class="status-actions" v-if="currentTicket.status !== 'closed'">
+        <h4>状态流转</h4>
+        <div class="action-buttons">
+          <el-button 
+            v-if="currentTicket.status === 'pending'" 
+            type="primary" 
+            @click="handleStatusTransition('accept')"
+            :loading="transitioning"
+          >
+            受理
+          </el-button>
+          <el-button 
+            v-if="currentTicket.status === 'pending' || currentTicket.status === 'review'" 
+            type="warning" 
+            @click="handleStatusTransition('process')"
+            :loading="transitioning"
+          >
+            开始处理
+          </el-button>
+          <el-button 
+            v-if="currentTicket.status === 'processing'" 
+            type="primary" 
+            @click="handleStatusTransition('review')"
+            :loading="transitioning"
+          >
+            提交复核
+          </el-button>
+          <el-button 
+            v-if="currentTicket.status === 'review'" 
+            type="success" 
+            @click="handleStatusTransition('close')"
+            :loading="transitioning"
+          >
+            结案
+          </el-button>
+          <el-button 
+            v-if="currentTicket.status === 'review'" 
+            type="danger" 
+            @click="showRejectDialog"
+          >
+            驳回
+          </el-button>
+        </div>
+      </div>
 
       <div v-if="currentTicket.images && currentTicket.images.length > 0" class="detail-images">
         <h4>图片附件</h4>
@@ -240,6 +299,49 @@
           />
         </div>
       </div>
+
+      <div class="operation-timeline" v-if="operationLogs.length > 0">
+        <h4>操作时间线</h4>
+        <div class="timeline-filter">
+          <el-select v-model="logFilter" placeholder="筛选动作类型" clearable size="small" style="width: 150px;">
+            <el-option v-for="(label, action) in actionLabels" :key="action" :label="label" :value="action" />
+          </el-select>
+        </div>
+        <el-timeline>
+          <el-timeline-item
+            v-for="log in filteredLogs"
+            :key="log.id"
+            :timestamp="formatDate(log.created_at)"
+            :type="getLogType(log.action)"
+          >
+            <div class="log-content">
+              <strong>{{ actionLabels[log.action] || log.action }}</strong>
+              <div class="log-detail">
+                <span>操作人: {{ log.operator }}</span>
+                <span v-if="log.client_ip">IP: {{ log.client_ip }}</span>
+              </div>
+              <div v-if="log.remark" class="log-remark">{{ log.remark }}</div>
+            </div>
+          </el-timeline-item>
+        </el-timeline>
+      </div>
+    </el-dialog>
+
+    <el-dialog v-model="rejectDialogVisible" title="驳回工单" width="400px">
+      <el-form :model="rejectForm" label-width="100px">
+        <el-form-item label="驳回原因" required>
+          <el-input
+            v-model="rejectForm.reason"
+            type="textarea"
+            :rows="3"
+            placeholder="请输入驳回原因（必填）"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="rejectDialogVisible = false">取消</el-button>
+        <el-button type="danger" @click="handleReject" :loading="transitioning">确认驳回</el-button>
+      </template>
     </el-dialog>
   </div>
 </template>
@@ -252,22 +354,31 @@ import {
   createTicket,
   updateTicket,
   deleteTicket,
+  transitionStatus,
+  getOperationLogs,
   uploadImages,
   getBrands,
   getComplaintTypes,
-  getCompensationTypes
+  getCompensationTypes,
+  getStatuses,
+  getSlaConfig,
+  getActions
 } from '../utils/api'
 
 const loading = ref(false)
 const submitting = ref(false)
+const transitioning = ref(false)
 const tickets = ref([])
 const brands = ref([])
 const complaintTypes = ref([])
 const compensationTypes = ref([])
+const statusOptions = ref([])
+const slaConfig = ref({})
+const actionLabels = ref({})
 
 const filterForm = reactive({
   brand: '',
-  is_closed: null
+  status: ''
 })
 
 const pagination = reactive({
@@ -278,10 +389,18 @@ const pagination = reactive({
 
 const dialogVisible = ref(false)
 const detailVisible = ref(false)
+const rejectDialogVisible = ref(false)
 const isEditMode = ref(false)
 const currentTicketId = ref(null)
 const ticketFormRef = ref(null)
 const imageFileList = ref([])
+
+const operationLogs = ref([])
+const logFilter = ref('')
+
+const rejectForm = reactive({
+  reason: ''
+})
 
 const currentTicket = ref({
   id: null,
@@ -292,8 +411,10 @@ const currentTicket = ref({
   has_compensation: false,
   compensation_type: '',
   compensation_amount: 0,
+  status: 'pending',
   is_closed: false,
   closing_remark: '',
+  rejected_reason: '',
   created_at: '',
   updated_at: '',
   images: []
@@ -313,9 +434,14 @@ const ticketForm = reactive({
 
 const dialogTitle = computed(() => isEditMode.value ? '编辑工单' : '新增工单')
 const uploadUrl = computed(() => {
-  return isEditMode.value ? `/api/tickets/${currentTicketId.value}/images` : ''
+  return isEditMode.value ? `http://127.0.0.1:8000/tickets/${currentTicketId.value}/images` : ''
 })
 const uploadHeaders = computed(() => ({}))
+
+const filteredLogs = computed(() => {
+  if (!logFilter.value) return operationLogs.value
+  return operationLogs.value.filter(log => log.action === logFilter.value)
+})
 
 const validateCompensationType = (rule, value, callback) => {
   if (ticketForm.has_compensation && ticketForm.compensation_amount > 0 && !ticketForm.compensation_type) {
@@ -340,6 +466,42 @@ const getBrandTagType = (brand) => {
     '华莱士': 'success'
   }
   return types[brand] || 'info'
+}
+
+const getStatusName = (status) => {
+  const names = {
+    'pending': '待受理',
+    'processing': '处理中',
+    'review': '待复核',
+    'closed': '已结案'
+  }
+  return names[status] || status
+}
+
+const getStatusTagType = (status) => {
+  const types = {
+    'pending': 'info',
+    'processing': 'warning',
+    'review': 'primary',
+    'closed': 'success'
+  }
+  return types[status] || 'info'
+}
+
+const getLogType = (action) => {
+  const types = {
+    'create': 'success',
+    'update': 'primary',
+    'delete': 'danger',
+    'accept': 'primary',
+    'process': 'warning',
+    'review': 'primary',
+    'close': 'success',
+    'reject': 'danger',
+    'upload_image': 'info',
+    'delete_image': 'info'
+  }
+  return types[action] || 'info'
 }
 
 const formatDate = (dateStr) => {
@@ -367,9 +529,7 @@ const fetchTickets = async () => {
       page_size: pagination.page_size
     }
     if (filterForm.brand) params.brand = filterForm.brand
-    if (filterForm.is_closed !== null && filterForm.is_closed !== '') {
-      params.is_closed = filterForm.is_closed
-    }
+    if (filterForm.status) params.status = filterForm.status
     const res = await getTickets(params)
     tickets.value = res.data.items
     pagination.total = res.data.total
@@ -383,7 +543,7 @@ const fetchTickets = async () => {
 
 const resetFilter = () => {
   filterForm.brand = ''
-  filterForm.is_closed = null
+  filterForm.status = ''
   pagination.page = 1
   fetchTickets()
 }
@@ -427,9 +587,66 @@ const openEditDialog = (row) => {
   dialogVisible.value = true
 }
 
-const viewDetail = (row) => {
-  currentTicket.value = row
-  detailVisible.value = true
+const viewDetail = async (row) => {
+  try {
+    const res = await getTicket(row.id)
+    currentTicket.value = res.data
+    
+    const logsRes = await getOperationLogs(row.id)
+    operationLogs.value = logsRes.data
+    logFilter.value = ''
+    
+    detailVisible.value = true
+  } catch (err) {
+    ElMessage.error('获取工单详情失败')
+    console.error(err)
+  }
+}
+
+const handleStatusTransition = async (action) => {
+  try {
+    transitioning.value = true
+    await transitionStatus(currentTicket.value.id, { action })
+    ElMessage.success('状态变更成功')
+    
+    await viewDetail({ id: currentTicket.value.id })
+    fetchTickets()
+  } catch (err) {
+    ElMessage.error(err.response?.data?.detail || '状态变更失败')
+    console.error(err)
+  } finally {
+    transitioning.value = false
+  }
+}
+
+const showRejectDialog = () => {
+  rejectForm.reason = ''
+  rejectDialogVisible.value = true
+}
+
+const handleReject = async () => {
+  if (!rejectForm.reason.trim()) {
+    ElMessage.warning('请填写驳回原因')
+    return
+  }
+  
+  try {
+    transitioning.value = true
+    await transitionStatus(currentTicket.value.id, {
+      action: 'reject',
+      rejected_reason: rejectForm.reason
+    })
+    ElMessage.success('工单已驳回')
+    rejectDialogVisible.value = false
+    
+    await viewDetail({ id: currentTicket.value.id })
+    fetchTickets()
+  } catch (err) {
+    ElMessage.error(err.response?.data?.detail || '驳回失败')
+    console.error(err)
+  } finally {
+    transitioning.value = false
+  }
 }
 
 const handleDelete = (row) => {
@@ -515,14 +732,20 @@ const beforeUpload = (file) => {
 
 const loadBaseData = async () => {
   try {
-    const [brandsRes, typesRes, compRes] = await Promise.all([
+    const [brandsRes, typesRes, compRes, statusesRes, slaRes, actionsRes] = await Promise.all([
       getBrands(),
       getComplaintTypes(),
-      getCompensationTypes()
+      getCompensationTypes(),
+      getStatuses(),
+      getSlaConfig(),
+      getActions()
     ])
     brands.value = brandsRes.data.brands
     complaintTypes.value = typesRes.data.types
     compensationTypes.value = compRes.data.types
+    statusOptions.value = statusesRes.data.statuses
+    slaConfig.value = slaRes.data
+    actionLabels.value = actionsRes.data.actions
   } catch (err) {
     console.error('加载基础数据失败', err)
   }
@@ -567,6 +790,31 @@ onMounted(() => {
   color: #909399;
 }
 
+.sla-badge {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 2px 6px;
+  font-size: 11px;
+  border-radius: 3px;
+  background-color: #e6a23c;
+  color: white;
+}
+
+.sla-badge.sla-warning {
+  background-color: #f56c6c;
+}
+
+.sla-badge.sla-breached {
+  background-color: #f56c6c;
+  font-weight: bold;
+  animation: pulse 1.5s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
 .upload-tip {
   font-size: 12px;
   color: #909399;
@@ -595,6 +843,57 @@ onMounted(() => {
   cursor: pointer;
 }
 
+.status-actions {
+  margin: 20px 0;
+  padding: 15px;
+  background-color: #f5f7fa;
+  border-radius: 4px;
+}
+
+.status-actions h4 {
+  margin: 0 0 12px 0;
+  color: #303133;
+}
+
+.action-buttons {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.operation-timeline {
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 1px solid #ebeef5;
+}
+
+.operation-timeline h4 {
+  margin: 0 0 12px 0;
+  color: #303133;
+}
+
+.timeline-filter {
+  margin-bottom: 16px;
+}
+
+.log-content {
+  padding: 8px 0;
+}
+
+.log-detail {
+  display: flex;
+  gap: 16px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: #909399;
+}
+
+.log-remark {
+  margin-top: 4px;
+  font-size: 13px;
+  color: #606266;
+}
+
 :deep(.el-form-item) {
   margin-bottom: 18px;
 }
@@ -607,5 +906,9 @@ onMounted(() => {
 :deep(.el-upload-list--picture-card .el-upload-list__item) {
   width: 88px;
   height: 88px;
+}
+
+:deep(.el-timeline-item__content) {
+  padding-bottom: 8px;
 }
 </style>
